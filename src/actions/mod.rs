@@ -23,11 +23,13 @@ impl Plugin for ActionsPlugin {
 pub struct Actions {
     pub player_movement: Option<Vec2>,
     pub player_rotation: Option<Vec2>,
+    pub player_aim: bool,
 }
 
 pub fn set_movement_actions(
     mut actions: ResMut<Actions>,
     keyboard_input: Res<ButtonInput<KeyCode>>,
+    mouse_button_input: Res<ButtonInput<MouseButton>>,
     params: Option<Res<AccumulatedMouseMotion>>,
 ) {
     let player_movement = Vec2::new(
@@ -52,4 +54,6 @@ pub fn set_movement_actions(
     } else {
         actions.player_rotation = None;
     }
+
+    actions.player_aim = mouse_button_input.pressed(MouseButton::Right);
 }
