@@ -6,17 +6,22 @@ use bevy_kira_audio::prelude::*;
 
 pub struct InternalAudioPlugin;
 
+#[derive(Resource, Default)]
+pub struct FireRequest(pub bool);
+
 // This plugin is responsible to control the game audio
 impl Plugin for InternalAudioPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(AudioPlugin)
+            .init_resource::<FireRequest>()
             .add_systems(OnEnter(GameState::Playing), start_audio)
             .add_systems(
                 Update,
                 control_flying_sound
                     .after(set_movement_actions)
                     .run_if(in_state(GameState::Playing)),
-            );
+            )
+            .add_systems(Update, play_fire_sound.run_if(in_state(GameState::Playing)));
     }
 }
 
@@ -24,7 +29,7 @@ impl Plugin for InternalAudioPlugin {
 struct FlyingAudio(Handle<AudioInstance>);
 
 fn start_audio(mut commands: Commands, audio_assets: Res<AudioAssets>, audio: Res<Audio>) {
-    audio.pause();
+    // audio.pause(); // Removed to see if this fixes the "tick" issue
     let handle = audio
         .play(audio_assets.flying.clone())
         .looped()
@@ -52,5 +57,16 @@ fn control_flying_sound(
             }
             _ => {}
         }
+    }
+}
+
+fn play_fire_sound(
+    mut fire_request: ResMut<FireRequest>,
+    audio_assets: Res<AudioAssets>,
+    audio: Res<Audio>,
+) {
+    if fire_request.0 {
+        audio.play(audio_assets.burst_fire.clone()).with_volume(1.0);
+        fire_request.0 = false;
     }
 }
