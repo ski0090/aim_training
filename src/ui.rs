@@ -9,7 +9,8 @@ impl Plugin for GameUiPlugin {
             .add_systems(OnEnter(GameState::Playing), setup_rhythm_ui)
             .add_systems(
                 Update,
-                (spawn_notes, move_notes, despawn_notes).run_if(in_state(GameState::Playing)),
+                (spawn_notes, move_notes, despawn_notes, check_hit)
+                    .run_if(in_state(GameState::Playing)),
             )
             .add_systems(OnExit(GameState::Playing), cleanup_rhythm_ui);
     }
@@ -26,6 +27,13 @@ struct Note;
 
 #[derive(Component)]
 struct TargetLine;
+
+#[derive(Component, PartialEq)]
+enum HitStatus {
+    None,
+    Hit,
+    Miss,
+}
 
 fn setup_rhythm_ui(mut commands: Commands) {
     let root = commands
@@ -80,6 +88,7 @@ fn spawn_notes(
                     },
                     BackgroundColor(Color::srgba(0.0, 1.0, 0.0, 0.8)),
                     Note,
+                    HitStatus::None,
                 ))
                 .id();
             commands.entity(root).add_child(note);
@@ -94,6 +103,58 @@ fn move_notes(mut query: Query<(Entity, &mut Node), With<Note>>, time: Res<Time>
         if let Val::Percent(current_left) = node.left {
             let new_left = current_left - speed * time.delta_secs();
             node.left = Val::Percent(new_left);
+        }
+    }
+}
+
+fn check_hit(
+    mut commands: Commands,
+    mouse_button_input: Res<ButtonInput<MouseButton>>,
+    mut query: Query<(Entity, &Node, &mut BackgroundColor, &mut HitStatus), With<Note>>,
+) {
+    if mouse_button_input.just_pressed(MouseButton::Left) {
+        let target_pos = 20.0;
+        let hit_window = 5.0; // +/- 5%
+
+        // Find the closest note to the target
+        let mut closest_note: Option<(Entity, f32, Mut<BackgroundColor>, Mut<HitStatus>)> = None;
+        let mut min_diff = f32::MAX;
+
+        for (entity, node, bg_color, status) in &mut query {
+            if *status != HitStatus::None {
+                continue;
+            }
+
+            if let Val::Percent(left) = node.left {
+                let diff = (left - target_pos).abs();
+                if diff < min_diff {
+                    min_diff = diff;
+                    closest_note = Some((entity, left - target_pos, bg_color, status));
+                }
+            }
+        }
+
+        if let Some((_entity, diff_signed, mut bg_color, mut status)) = closest_note {
+            // Check if within reasonable range to be considered an attempt (e.g., +/- 15%)
+            if diff_signed.abs() <= 0.5 {
+                if diff_signed.abs() <= hit_window {
+                    // Hit!
+                    *bg_color = BackgroundColor(Color::srgba(1.0, 0.0, 0.0, 1.0)); // Red
+                    *status = HitStatus::Hit;
+                    info!("Hit! Diff: {:.2}", diff_signed);
+                } else if diff_signed > hit_window {
+                    // Too Early (Positive diff means to the right)
+                    *bg_color = BackgroundColor(Color::srgba(0.5, 0.5, 0.5, 1.0)); // Gray
+                    *status = HitStatus::Miss;
+                    info!("Too Early! Diff: {:.2}", diff_signed);
+                } else {
+                    // Too Late (Negative diff means to the left)
+                    // Optional: Can also handle late misses here
+                    *bg_color = BackgroundColor(Color::srgba(0.5, 0.5, 0.5, 1.0)); // Gray
+                    *status = HitStatus::Miss;
+                    info!("Too Late! Diff: {:.2}", diff_signed);
+                }
+            }
         }
     }
 }
