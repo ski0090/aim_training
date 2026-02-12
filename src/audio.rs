@@ -30,11 +30,7 @@ struct FlyingAudio(Handle<AudioInstance>);
 
 fn start_audio(mut commands: Commands, audio_assets: Res<AudioAssets>, audio: Res<Audio>) {
     // audio.pause(); // Removed to see if this fixes the "tick" issue
-    let handle = audio
-        .play(audio_assets.flying.clone())
-        .looped()
-        .with_volume(0.3)
-        .handle();
+    let handle = audio.play(audio_assets.flying.clone()).looped().handle();
     commands.insert_resource(FlyingAudio(handle));
 }
 
@@ -66,7 +62,7 @@ fn play_fire_sound(
     audio: Res<Audio>,
 ) {
     if fire_request.0 {
-        audio.play(audio_assets.burst_fire.clone()).with_volume(1.0);
+        audio.play(audio_assets.burst_fire.clone());
         fire_request.0 = false;
     }
 }
