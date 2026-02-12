@@ -1,4 +1,5 @@
 use crate::GameState;
+use crate::audio::FireRequest;
 use bevy::prelude::*;
 
 pub struct GameUiPlugin;
@@ -10,6 +11,8 @@ impl Plugin for GameUiPlugin {
             TimerMode::Repeating,
         )))
         .init_resource::<Combo>()
+        .init_resource::<AutoMode>()
+        .init_resource::<RhythmRunning>()
         .add_systems(OnEnter(GameState::Playing), setup_rhythm_ui)
         .add_systems(
             Update,
@@ -20,6 +23,7 @@ impl Plugin for GameUiPlugin {
                 check_hit,
                 update_combo_ui,
                 fade_judgement,
+                toggle_auto_mode,
             )
                 .run_if(in_state(GameState::Playing)),
         )
@@ -32,6 +36,12 @@ struct BeatTimer(Timer);
 
 #[derive(Resource, Default)]
 struct Combo(u32);
+
+#[derive(Resource, Default)]
+struct AutoMode(bool);
+
+#[derive(Resource, Default)]
+struct RhythmRunning(bool);
 
 #[derive(Component)]
 struct RhythmUiRoot;
@@ -47,6 +57,12 @@ struct JudgementText;
 
 #[derive(Component)]
 struct ComboText;
+
+#[derive(Component)]
+struct AutoModeText;
+
+#[derive(Component)]
+struct StartText;
 
 #[derive(Component)]
 struct JudgementTimer(Timer);
@@ -115,7 +131,6 @@ fn setup_rhythm_ui(mut commands: Commands) {
         ))
         .id();
 
-    // Combo Text
     let combo = commands
         .spawn((
             Text::new("Combo: 0"),
@@ -138,9 +153,58 @@ fn setup_rhythm_ui(mut commands: Commands) {
         ))
         .id();
 
+    // Auto Mode Indicator
+    let auto_mode_text = commands
+        .spawn((
+            Text::new("AUTO MODE: OFF"),
+            TextFont {
+                font_size: 25.0,
+                ..default()
+            },
+            TextColor(Color::srgba(0.5, 0.5, 0.5, 0.5)), // Gray, semi-transparent
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Percent(10.0),
+                left: Val::Percent(50.0), // Center horizontally
+                margin: UiRect {
+                    left: Val::Px(-100.0), // Approximate half width centering
+                    ..default()
+                },
+                ..default()
+            },
+            AutoModeText,
+        ))
+        .id();
+
+    // Start Text
+    let start_text = commands
+        .spawn((
+            Text::new("CLICK TO START"),
+            TextFont {
+                font_size: 50.0,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(50.0),
+                top: Val::Percent(50.0), // Center
+                margin: UiRect {
+                    left: Val::Px(-150.0),
+                    top: Val::Px(-25.0),
+                    ..default()
+                },
+                ..default()
+            },
+            StartText,
+        ))
+        .id();
+
     commands.entity(root).add_child(target);
     commands.entity(root).add_child(judgement);
     commands.entity(root).add_child(combo);
+    commands.entity(root).add_child(auto_mode_text);
+    commands.entity(root).add_child(start_text);
 }
 
 fn spawn_notes(
@@ -148,7 +212,11 @@ fn spawn_notes(
     mut timer: ResMut<BeatTimer>,
     time: Res<Time>,
     root_query: Query<Entity, With<RhythmUiRoot>>,
+    rhythm_running: Res<RhythmRunning>,
 ) {
+    if !rhythm_running.0 {
+        return;
+    }
     timer.0.tick(time.delta());
     if timer.0.just_finished() {
         if let Some(root) = root_query.iter().next() {
@@ -176,7 +244,14 @@ fn spawn_notes(
     }
 }
 
-fn move_notes(mut query: Query<(Entity, &mut Node), With<Note>>, time: Res<Time>) {
+fn move_notes(
+    mut query: Query<(Entity, &mut Node), With<Note>>,
+    time: Res<Time>,
+    rhythm_running: Res<RhythmRunning>,
+) {
+    if !rhythm_running.0 {
+        return;
+    }
     let speed = 40.0; // Speed in Percent per second
 
     for (_entity, mut node) in &mut query {
@@ -195,11 +270,32 @@ fn check_hit(
         With<JudgementText>,
     >,
     mut combo: ResMut<Combo>,
+    auto_mode: Res<AutoMode>,
+    mut fire_request: ResMut<FireRequest>,
+    mut rhythm_running: ResMut<RhythmRunning>,
+    mut start_text_query: Query<&mut Visibility, With<StartText>>,
+    mut beat_timer: ResMut<BeatTimer>,
 ) {
-    if mouse_button_input.just_pressed(MouseButton::Left) {
-        let target_pos = 80.0; // Target is at 80% Top
-        let hit_window = 5.0; // +/- 5%
+    // Start Game Logic
+    if !rhythm_running.0 {
+        if mouse_button_input.just_pressed(MouseButton::Left) {
+            rhythm_running.0 = true;
+            beat_timer.0.reset(); // Snyc start
+            if let Some(mut vis) = start_text_query.iter_mut().next() {
+                *vis = Visibility::Hidden;
+            }
+            fire_request.0 = true; // Play start sound
+        }
+        return;
+    }
 
+    let target_pos = 80.0; // Target is at 80% Top
+    let hit_window = 5.0; // +/- 5%
+
+    // Logic for Auto Mode or Manual Input
+    let should_check = auto_mode.0 || mouse_button_input.just_pressed(MouseButton::Left);
+
+    if should_check {
         // Find the closest note to the target
         let mut closest_note: Option<(Entity, f32, Mut<BackgroundColor>, Mut<HitStatus>)> = None;
         let mut min_diff = f32::MAX;
@@ -210,13 +306,35 @@ fn check_hit(
             }
 
             if let Val::Percent(top) = node.top {
-                let diff = (top - target_pos).abs();
-                if diff < min_diff {
-                    min_diff = diff;
-                    closest_note = Some((entity, top - target_pos, bg_color, status));
+                let diff = top - target_pos as f32;
+                // For AutoMode, we only care if it's EXACTLY inside the perfect window to trigger
+                // For Manual, we find the closest one in range
+
+                // If AutoMode, wait until it's very close (e.g., within 0.5)
+                if auto_mode.0 {
+                    if diff.abs() <= 1.0 {
+                        // Found a note to hit perfectly
+                        // We can break early or just pick this one
+                        closest_note = Some((entity, diff, bg_color, status));
+                        break;
+                    }
+                } else {
+                    // Manual mode: find closest
+                    let abs_diff = diff.abs();
+                    if abs_diff < min_diff {
+                        min_diff = abs_diff;
+                        closest_note = Some((entity, diff, bg_color, status));
+                    }
                 }
             }
         }
+
+        // If we are in AutoMode but didn't find a note in perfect range, return
+        if auto_mode.0 && closest_note.is_none() {
+            return;
+        }
+
+        let mut should_reset = false;
 
         if let Some((mut judgement_text, mut judgement_color, mut timer)) =
             judgement_query.iter_mut().next()
@@ -230,6 +348,7 @@ fn check_hit(
                         *bg_color = BackgroundColor(Color::srgba(1.0, 0.0, 0.0, 1.0)); // Red
                         *status = HitStatus::Hit;
                         combo.0 += 1;
+                        fire_request.0 = true; // Play sound
 
                         // Precise judgement
                         if diff_signed.abs() <= 1.0 {
@@ -242,23 +361,82 @@ fn check_hit(
 
                         info!("Hit! Diff: {:.2}", diff_signed);
                     } else if diff_signed > hit_window {
-                        // Too Late (Top > Target)
-                        *bg_color = BackgroundColor(Color::srgba(0.5, 0.5, 0.5, 1.0)); // Gray
-                        *status = HitStatus::Miss;
-                        combo.0 = 0;
-                        judgement_text.0 = "LATE".to_string();
-                        judgement_color.0 = Color::srgb(1.0, 0.65, 0.0); // Orange
-                        info!("Too Late! Diff: {:.2}", diff_signed);
+                        // Only process miss on manual input, auto mode shouldn't miss if logic is correct
+                        // But if user clicks late, it's a miss.
+                        if !auto_mode.0 {
+                            // Too Late (Top > Target)
+                            *bg_color = BackgroundColor(Color::srgba(0.5, 0.5, 0.5, 1.0)); // Gray
+                            *status = HitStatus::Miss;
+                            combo.0 = 0;
+                            judgement_text.0 = "LATE (MISS)".to_string();
+                            judgement_color.0 = Color::srgb(1.0, 0.0, 0.0); // Red
+                            info!("Too Late! Diff: {:.2}", diff_signed);
+
+                            should_reset = true;
+                        }
                     } else {
-                        // Too Early (Top < Target)
-                        *bg_color = BackgroundColor(Color::srgba(0.5, 0.5, 0.5, 1.0)); // Gray
-                        *status = HitStatus::Miss;
+                        if !auto_mode.0 {
+                            // Too Early (Top < Target)
+                            *bg_color = BackgroundColor(Color::srgba(0.5, 0.5, 0.5, 1.0)); // Gray
+                            *status = HitStatus::Miss;
+                            combo.0 = 0;
+                            judgement_text.0 = "EARLY (MISS)".to_string();
+                            judgement_color.0 = Color::srgb(1.0, 0.0, 0.0); // Red
+                            info!("Too Early! Diff: {:.2}", diff_signed);
+
+                            should_reset = true;
+                        }
+                    }
+                } else {
+                    // Out of reasonable range (Spamming far from any note)
+                    if !auto_mode.0 {
                         combo.0 = 0;
-                        judgement_text.0 = "EARLY".to_string();
-                        judgement_color.0 = Color::srgb(1.0, 0.65, 0.0); // Orange
-                        info!("Too Early! Diff: {:.2}", diff_signed);
+                        judgement_text.0 = "MISS".to_string();
+                        judgement_color.0 = Color::srgb(1.0, 0.0, 0.0); // Red
+                        timer.0.reset();
+
+                        should_reset = true;
                     }
                 }
+            } else {
+                // No notes found (Spamming empty space)
+                if !auto_mode.0 {
+                    combo.0 = 0;
+                    judgement_text.0 = "MISS".to_string();
+                    judgement_color.0 = Color::srgb(1.0, 0.0, 0.0); // Red
+                    timer.0.reset();
+
+                    should_reset = true;
+                }
+            }
+        }
+
+        if should_reset {
+            // Trigger Miss Routine - Stop movement only, don't despawn notes
+            rhythm_running.0 = false;
+            if let Some(mut vis) = start_text_query.iter_mut().next() {
+                *vis = Visibility::Visible;
+            }
+        }
+    }
+}
+
+fn toggle_auto_mode(
+    input: Res<ButtonInput<KeyCode>>,
+    mut auto_mode: ResMut<AutoMode>,
+    mut query: Query<(&mut Text, &mut TextColor), With<AutoModeText>>,
+) {
+    if input.just_pressed(KeyCode::F1) {
+        auto_mode.0 = !auto_mode.0;
+        info!("Auto Mode: {}", auto_mode.0);
+
+        if let Some((mut text, mut color)) = query.iter_mut().next() {
+            if auto_mode.0 {
+                text.0 = "AUTO MODE: ON".to_string();
+                color.0 = Color::srgb(0.0, 1.0, 1.0); // Cyan
+            } else {
+                text.0 = "AUTO MODE: OFF".to_string();
+                color.0 = Color::srgba(1., 0.5, 0.5, 0.5); // Gray
             }
         }
     }
@@ -291,7 +469,13 @@ fn despawn_notes(
         (&mut Text, &mut TextColor, &mut JudgementTimer),
         With<JudgementText>,
     >,
+    mut rhythm_running: ResMut<RhythmRunning>,
+    mut start_text_query: Query<&mut Visibility, With<StartText>>,
 ) {
+    if !rhythm_running.0 {
+        return;
+    }
+
     for (entity, node, status) in &query {
         if let Val::Percent(top) = node.top {
             if top > 110.0 {
@@ -305,8 +489,18 @@ fn despawn_notes(
                         color.0 = Color::srgb(1.0, 0.0, 0.0); // Red
                         timer.0.reset();
                     }
+
+                    // Stop movement, show restart text, but DON'T despawn notes
+                    rhythm_running.0 = false;
+                    if let Some(mut vis) = start_text_query.iter_mut().next() {
+                        *vis = Visibility::Visible;
+                    }
+                    return; // Stop processing, keep all notes on screen
                 }
-                commands.entity(entity).despawn_children().despawn();
+                // Only despawn notes that were hit
+                if *status == HitStatus::Hit {
+                    commands.entity(entity).despawn();
+                }
             }
         }
     }
